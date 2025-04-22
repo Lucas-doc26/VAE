@@ -1,14 +1,26 @@
 import os
-
-os.environ["KERAS_BACKEND"] = "tensorflow"
-
 import numpy as np
 import tensorflow as tf
 import keras
 import pandas as pd
-from keras import ops
-from keras import layers
+from keras import ops, layers
 import cv2
+import matplotlib.pyplot as plt
+from tensorflow.keras import backend as K
+import tensorflow.image as tf_img
+from tensorflow.keras.models import Model
+from tensorflow.keras.callbacks import ModelCheckpoint
+
+os.environ["KERAS_BACKEND"] = "tensorflow"
+
+gpus = tf.config.experimental.list_physical_devices('GPU')
+print(gpus)
+if gpus:
+    try:
+        for gpu in gpus:
+            tf.config.experimental.set_memory_growth(gpu, True)
+    except RuntimeError as e:
+        print(e)
 
 def preprocess_images(target_shape, csv):
     imagens = []
@@ -27,16 +39,6 @@ def preprocess_images(target_shape, csv):
 
 treino = preprocess_images((64,64), "CSV/PUC/PUC_Segmentado_Treino.csv")
 teste = preprocess_images((64,64), "CSV/PUC/PUC_Segmentado_Validacao.csv")
-
-gpus = tf.config.experimental.list_physical_devices('GPU')
-print(gpus)
-if gpus:
-    try:
-        for gpu in gpus:
-            tf.config.experimental.set_memory_growth(gpu, True)
-    except RuntimeError as e:
-        print(e)
-
 
 class Sampling(layers.Layer):
     """Uses (z_mean, z_log_var) to sample z, the vector encoding a digit."""
@@ -124,11 +126,12 @@ mnist_digits = np.concatenate([treino, teste], axis=0)
 
 vae = VAE(encoder, decoder)
 vae.compile(optimizer=keras.optimizers.Adam())
-vae.fit(mnist_digits, epochs=150, batch_size=16)
+vae.fit(mnist_digits, epochs=200, batch_size=16)
+#vae.build((None, 64, 64, 3))  # Aqui você especifica o formato da entrada.
 
-import matplotlib.pyplot as plt
-from tensorflow.keras import backend as K
-import tensorflow.image as tf_img
+#vae.save_weights('vae_weights.weights.h5')
+
+#vae.load_weights('vae_weights.weights.h5')
 
 def calcular_ssim(image1, image2):
     return tf_img.ssim(image1, image2, max_val=1.0).numpy()
@@ -179,3 +182,79 @@ def plot_autoencoder(x_test, Autoencoder, width=64, height=64, caminho_para_salv
     plt.close("all") 
 
 plot_autoencoder(teste, vae, caminho_para_salvar='/home/lucas/VAE')
+
+def plot_heat_map(teste, encoder, decoder):
+    # Pegue a camada de interesse (a última Conv2D do encoder)
+    layer_name = [layer.name for layer in encoder.layers if isinstance(layer, keras.layers.Conv2D)][-1]
+    print("Usando camada:", layer_name)
+
+    # Cria um modelo auxiliar que vai até essa camada
+    activation_model = Model(inputs=encoder.input,
+                             outputs=encoder.get_layer(layer_name).output)
+
+    # Função para processar uma imagem
+    def process_image(input_img):
+        # Redimensionar a imagem para garantir a forma correta
+        if input_img.shape != (64, 64, 3):
+            input_img = tf.image.resize(input_img, (64, 64))
+
+        # Expandir a imagem para o formato batch
+        input_img_batch = np.expand_dims(input_img, axis=0)  # shape: (1, 64, 64, 3)
+
+        # Obter as ativações da última camada Conv2D
+        activations = activation_model.predict(input_img_batch)  # shape: (1, H, W, filters)
+        activation_map = np.mean(activations[0], axis=-1)  # média entre todos os filtros
+
+        # Obter a codificação latente z e reconstrução da imagem
+        _, _, z_occ = encoder.predict(input_img_batch)  # shape: (1, latent_dim)
+        occ_reconstructed_img = decoder.predict(z_occ)  # reconstrução da imagem
+
+        return input_img, occ_reconstructed_img[0], activation_map
+
+    # Imagem 1
+    input_img_1, occ_reconstructed_img_1, activation_map_1 = process_image(teste[0])
+
+    # Imagem 2
+    input_img_2, empty_reconstructed_img_2, activation_map_2 = process_image(teste[33])
+
+    # Exibir gráfico
+    plt.figure(figsize=(12, 8))
+
+    # Exibir para a primeira imagem
+    plt.subplot(2, 3, 1)
+    plt.imshow(input_img_1)
+    plt.title("Imagem Original 1")
+    plt.axis('off')
+
+    plt.subplot(2, 3, 2)
+    plt.imshow(occ_reconstructed_img_1)
+    plt.title("Imagem Reconstruída 1")
+    plt.axis('off')
+
+    plt.subplot(2, 3, 3)
+    plt.imshow(activation_map_1, cmap='viridis')
+    plt.title("Mapa de Ativação 1")
+    plt.axis('off')
+
+    # Exibir para a segunda imagem
+    plt.subplot(2, 3, 4)
+    plt.imshow(input_img_2)
+    plt.title("Imagem Original 2")
+    plt.axis('off')
+
+    plt.subplot(2, 3, 5)
+    plt.imshow(empty_reconstructed_img_2)
+    plt.title("Imagem Reconstruída 2")
+    plt.axis('off')
+
+    plt.subplot(2, 3, 6)
+    plt.imshow(activation_map_2, cmap='viridis')
+    plt.title("Mapa de Ativação 2")
+    plt.axis('off')
+
+    # Ajuste o layout e exiba
+    plt.tight_layout()
+    plt.savefig("img.png")
+    plt.show()
+
+plot_heat_map(teste, encoder, decoder)
